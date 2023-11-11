@@ -163,7 +163,7 @@ async fn run_server(config: Arc<Config>) -> anyhow::Result<()> {
     #[cfg(feature = "openid")]
     let routes = routes.or(openid::apis(
         db_manager.clone(),
-        config.openid_config.clone(),
+        Arc::new(config.openid_config.clone()),
     ));
 
     let routes = routes

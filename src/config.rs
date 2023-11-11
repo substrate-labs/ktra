@@ -2,7 +2,6 @@ use futures::TryFutureExt;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, BufReader};
 
@@ -191,7 +190,7 @@ pub struct Config {
     #[serde(default)]
     pub server_config: ServerConfig,
     #[serde(default)]
-    pub openid_config: Arc<OpenIdConfig>,
+    pub openid_config: OpenIdConfig,
 }
 
 impl Default for Config {
