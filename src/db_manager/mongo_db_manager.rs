@@ -1,6 +1,6 @@
 #![cfg(feature = "db-mongo")]
 
-use crate::config::DbConfig;
+use crate::config::Config;
 use crate::error::Error;
 use crate::models::{Entry, Metadata, Query, Search, User};
 use argon2::{self, hash_encoded, verify_encoded};
@@ -27,6 +27,7 @@ const ENTRIES_KEY: &str = "__ENTRIES__";
 const USERS_KEY: &str = "__USERS__";
 const PASSWORDS_KEY: &str = "__PASSWORDS__";
 const TOKENS_KEY: &str = "__TOKENS__";
+#[cfg(feature = "openid")]
 const OAUTH_NONCES_KEY: &str = "__OAUTH_NONCES__";
 
 #[derive(Clone, SerializeTrait, DeserializeTrait)]
@@ -56,10 +57,13 @@ pub struct MongoDbManager {
 #[async_trait]
 impl DbManager for MongoDbManager {
     #[tracing::instrument(skip(config))]
-    async fn new(config: &DbConfig) -> Result<MongoDbManager, Error> {
-        tracing::info!("connect to MongoDB server: {}", config.mongodb_url);
+    async fn new(config: &Config) -> Result<MongoDbManager, Error> {
+        tracing::info!(
+            "connect to MongoDB server: {}",
+            config.db_config.mongodb_url
+        );
 
-        let url = Url::parse(&config.mongodb_url).map_err(Error::UrlParsing)?;
+        let url = Url::parse(&config.db_config.mongodb_url).map_err(Error::UrlParsing)?;
         let database_name = url
             .path_segments()
             .and_then(|s| s.last())
@@ -81,7 +85,7 @@ impl DbManager for MongoDbManager {
             let db_manager = MongoDbManager {
                 client,
                 database_name,
-                login_prefix: config.login_prefix.clone(),
+                login_prefix: config.db_config.login_prefix.clone(),
             };
             Ok(db_manager)
         };

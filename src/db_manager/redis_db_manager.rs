@@ -1,6 +1,6 @@
 #![cfg(feature = "db-redis")]
 
-use crate::config::DbConfig;
+use crate::config::Config;
 use crate::error::Error;
 use crate::models::{Entry, Metadata, Query, Search, User};
 use argon2::{self, hash_encoded, verify_encoded};
@@ -23,6 +23,7 @@ const ENTRIES_KEY: &str = "ktra:__ENTRIES__";
 const USERS_KEY: &str = "ktra:__USERS__";
 const PASSWORDS_KEY: &str = "ktra:__PASSWORDS__";
 const TOKENS_KEY: &str = "ktra:__TOKENS__";
+#[cfg(feature = "openid")]
 const OAUTH_NONCES_KEY: &str = "ktra:__OAUTH_NONCES__";
 
 pub struct RedisDbManager {
@@ -33,11 +34,11 @@ pub struct RedisDbManager {
 #[async_trait]
 impl DbManager for RedisDbManager {
     #[tracing::instrument(skip(config))]
-    async fn new(config: &DbConfig) -> Result<RedisDbManager, Error> {
-        tracing::info!("connect to redis server: {}", config.redis_url);
+    async fn new(config: &Config) -> Result<RedisDbManager, Error> {
+        tracing::info!("connect to redis server: {}", config.db_config.redis_url);
 
         let initialization = async {
-            let client = Client::open(&*config.redis_url)?;
+            let client = Client::open(&*config.db_config.redis_url)?;
             let mut connection = client.get_async_connection().await?;
 
             if !connection.exists(SCHEMA_VERSION_KEY).await? {
@@ -46,7 +47,7 @@ impl DbManager for RedisDbManager {
 
             let db_manager = RedisDbManager {
                 client,
-                login_prefix: config.login_prefix.clone(),
+                login_prefix: config.db_config.login_prefix.clone(),
             };
             Ok(db_manager)
         };
