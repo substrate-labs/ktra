@@ -1,6 +1,6 @@
 use crate::db_manager::DbManager;
 use crate::error::Error;
-use crate::index_manager::IndexManager;
+use crate::git_manager::GitManager;
 use crate::models::Owners;
 use crate::utils::{
     authorization_header, ok_json_message, ok_with_msg_json_message, with_db_manager,
@@ -15,7 +15,7 @@ use warp::{Filter, Rejection, Reply};
 #[tracing::instrument(skip(db_manager, index_manager))]
 pub fn apis(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
 ) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     yank(db_manager.clone(), index_manager).or(owners(db_manager))
 }
@@ -23,7 +23,7 @@ pub fn apis(
 #[tracing::instrument(skip(db_manager, index_manager))]
 fn yank(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
 ) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     warp::delete()
         .and(with_db_manager(db_manager))
@@ -38,7 +38,7 @@ fn yank(
 #[tracing::instrument(skip(db_manager, index_manager, token, crate_name, version))]
 async fn handle_yank(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
     token: String,
     crate_name: String,
     version: Version,
@@ -70,6 +70,11 @@ async fn handle_yank(
 
     db_manager
         .yank(&crate_name, version)
+        .map_ok(ok_json_message)
+        .map_err(warp::reject::custom)
+        .await?;
+    index_manager
+        .backup()
         .map_ok(ok_json_message)
         .map_err(warp::reject::custom)
         .await

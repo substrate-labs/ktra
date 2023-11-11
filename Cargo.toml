@@ -25,7 +25,7 @@ db-mongo = ["mongodb", "bson"]
 [dependencies]
 tokio = { version = "1.1", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
 warp = "0.3"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.2"

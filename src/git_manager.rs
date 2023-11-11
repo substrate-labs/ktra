@@ -1,4 +1,4 @@
-use crate::config::IndexConfig;
+use crate::config::{Config, GitConfig};
 use crate::error::Error;
 use crate::models::Package;
 use crate::utils::package_dir_path;
@@ -9,43 +9,103 @@ use git2::{
 };
 use semver::Version;
 use std::io::SeekFrom;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
-pub struct IndexManager {
-    config: IndexConfig,
-    repository: Arc<Mutex<Repository>>,
+pub struct GitManager {
+    config: Arc<Config>,
+    backup: Arc<Mutex<Repository>>,
+    index: Arc<Mutex<Repository>>,
 }
 
-impl IndexManager {
+impl GitManager {
     #[tracing::instrument(skip(config))]
-    pub async fn new(config: IndexConfig) -> Result<IndexManager, Error> {
-        let repository = tokio::task::block_in_place(|| clone_or_open_repository(&config))
-            .map(Mutex::new)
-            .map(Arc::new)
-            .map_err(Error::Git)?;
-        let manager = IndexManager { config, repository };
+    pub async fn new(config: Arc<Config>) -> Result<GitManager, Error> {
+        let backup = tokio::task::block_in_place(|| {
+            clone_or_open_repository(
+                &config,
+                config.root_dir_path.as_path(),
+                &config.git_config.backup_branch,
+                &config.git_config.backup_remote_url,
+            )
+        })
+        .map_err(Error::Git)?;
+        let index = tokio::task::block_in_place(|| {
+            clone_or_open_repository(
+                &config,
+                &config.index_path(),
+                &config.git_config.index_branch,
+                &config.git_config.index_remote_url,
+            )
+        })
+        .map_err(Error::Git)?;
+        let manager = GitManager {
+            config,
+            backup,
+            index,
+        };
         Ok(manager)
+    }
+    async fn push_backup(&self, config: &GitConfig, message: impl AsRef<str>) -> Result<(), Error> {
+        let backup = self.backup.lock().await;
+        tokio::task::block_in_place(|| {
+            add_all(&backup)?;
+            commit(&backup, config, message)?;
+            push_to_origin(&backup, config)
+        })
+        .map_err(Error::Git)
+    }
+    async fn push_index(&self, config: &GitConfig, message: impl AsRef<str>) -> Result<(), Error> {
+        let index = &self.index.lock().await;
+        tokio::task::block_in_place(|| {
+            add_all(&index)?;
+            commit(&index, config, message)?;
+            push_to_origin(&index, config)
+        })
+        .map_err(Error::Git)
+    }
+
+    async fn pull_backup(&self, config: &GitConfig) -> Result<(), Error> {
+        let backup = self.backup.lock().await;
+        tokio::task::block_in_place(|| {
+            let fetch_commit = fetch(&backup, config)?;
+            merge(&backup, config, fetch_commit)?;
+            backup.checkout_head(None)
+        })
+        .map_err(Error::Git)
+    }
+
+    async fn pull_index(&self, config: &GitConfig) -> Result<(), Error> {
+        let index = self.index.lock().await;
+        tokio::task::block_in_place(|| {
+            let fetch_commit = fetch(&index, config)?;
+            merge(&index, config, fetch_commit)?;
+            index.checkout_head(None)
+        })
+        .map_err(Error::Git)
     }
 
     #[tracing::instrument(skip(self))]
     pub async fn pull(&self) -> Result<(), Error> {
-        let repository = self.repository.lock().await;
-        tokio::task::block_in_place(|| {
-            let fetch_commit = fetch(&repository, &self.config)?;
-            merge(&repository, &self.config, fetch_commit)?;
-            repository.checkout_head(None)
-        })
-        .map_err(Error::Git)
+        self.pull_backup(&self.config.git_config).await?;
+        self.pull_index(&self.config.git_config).await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn backup(&self) -> Result<(), Error> {
+        self.push_backup(&self.config.git_config, "backup").await?;
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, package))]
     pub async fn add_package(&self, package: Package) -> Result<(), Error> {
         let name = package.name.to_ascii_lowercase();
 
-        let mut index_path = self.config.local_path.clone();
+        let mut index_path = self.config.index_path();
         index_path.push(package_dir_path(&name)?);
         tokio::fs::create_dir_all(&index_path)
             .map_err(Error::Io)
@@ -78,13 +138,7 @@ impl IndexManager {
         file.sync_all().await?;
 
         let message = format!("Updating crate `{}#{}`", package.name, package.vers);
-        let repository = self.repository.lock().await;
-        tokio::task::block_in_place(|| {
-            add_all(&repository)?;
-            commit(&repository, &self.config, message)?;
-            push_to_origin(&repository, &self.config)
-        })
-        .map_err(Error::Git)
+        self.push_index(&self.config.git_config, message).await
     }
 
     #[tracing::instrument(skip(self, name, version, yanked))]
@@ -95,7 +149,7 @@ impl IndexManager {
         yanked: bool,
     ) -> Result<(), Error> {
         let name = name.into();
-        let mut index_path = self.config.local_path.clone();
+        let mut index_path = self.config.index_path();
         index_path.push(package_dir_path(&name)?);
         index_path.push(&name);
         let package_path = index_path;
@@ -151,13 +205,7 @@ impl IndexManager {
         } else {
             format!("Unyanking crate `{}#{}`", name, version)
         };
-        let repository = self.repository.lock().await;
-        tokio::task::block_in_place(|| {
-            add_all(&repository)?;
-            commit(&repository, &self.config, message)?;
-            push_to_origin(&repository, &self.config)
-        })
-        .map_err(Error::Git)
+        self.push_index(&self.config.git_config, message).await
     }
 
     #[tracing::instrument(skip(self, name, version))]
@@ -173,7 +221,7 @@ impl IndexManager {
 
 #[tracing::instrument(skip(config))]
 fn credentials_callback<'a>(
-    config: &'a IndexConfig,
+    config: &'a GitConfig,
 ) -> impl FnMut(&str, Option<&str>, CredentialType) -> Result<Cred, git2::Error> + 'a {
     move |_url, username, credential_type| {
         if credential_type.contains(CredentialType::SSH_KEY) && config.ssh_privkey_path.is_some() {
@@ -203,34 +251,37 @@ fn credentials_callback<'a>(
 }
 
 #[tracing::instrument(skip(config))]
-fn clone_or_open_repository(config: &IndexConfig) -> Result<git2::Repository, git2::Error> {
-    let path = config.local_path.as_path();
-
-    if path.exists() {
+fn clone_or_open_repository(
+    config: &Config,
+    path: &Path,
+    branch: &str,
+    remote_url: &str,
+) -> Result<Arc<Mutex<Repository>>, git2::Error> {
+    Ok(Arc::new(Mutex::new(if path.exists() {
         tracing::info!("open index repository: {:?}", path);
-        git2::Repository::open(path)
+        git2::Repository::open(path)?
     } else {
         tracing::info!("try to clone index repository into {:?}", path);
 
         let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(credentials_callback(config));
+        callbacks.credentials(credentials_callback(&config.git_config));
         let mut fetch_options = git2::FetchOptions::new();
         fetch_options.remote_callbacks(callbacks);
 
         let mut builder = git2::build::RepoBuilder::default();
-        builder.branch(&config.branch);
+        builder.branch(branch);
         builder.fetch_options(fetch_options);
 
-        builder.clone(&config.remote_url, path)
-    }
+        builder.clone(remote_url, path)?
+    })))
 }
 
 #[tracing::instrument(skip(repository, config))]
 fn fetch<'a>(
     repository: &'a Repository,
-    config: &IndexConfig,
+    config: &GitConfig,
 ) -> Result<AnnotatedCommit<'a>, git2::Error> {
-    tracing::info!("fetches latest commit from origin/{}", config.branch);
+    tracing::info!("fetches latest commit from origin/{}", config.index_branch);
 
     let mut remote = repository.find_remote("origin")?;
 
@@ -240,7 +291,7 @@ fn fetch<'a>(
     fetch_options.remote_callbacks(callbacks);
     fetch_options.download_tags(git2::AutotagOption::All);
 
-    let refspec = format!("refs/heads/{0}:refs/remotes/origin/{}", config.branch);
+    let refspec = format!("refs/heads/{0}:refs/remotes/origin/{}", config.index_branch);
     remote.fetch(&[refspec], Some(&mut fetch_options), None)?;
 
     let fetch_head = repository.find_reference("FETCH_HEAD")?;
@@ -310,7 +361,7 @@ fn normal_merge(
 #[tracing::instrument(skip(repository, config, fetch_commit))]
 fn merge(
     repository: &Repository,
-    config: &IndexConfig,
+    config: &GitConfig,
     fetch_commit: AnnotatedCommit,
 ) -> Result<(), git2::Error> {
     tracing::info!("start merging");
@@ -318,7 +369,7 @@ fn merge(
     let analysis = repository.merge_analysis(&[&fetch_commit])?;
 
     if analysis.0.is_fast_forward() {
-        let refname = format!("refs/heads/{}", config.branch);
+        let refname = format!("refs/heads/{}", config.index_branch);
         match repository.find_reference(&refname) {
             Ok(mut reference) => fast_forward(repository, &mut reference, &fetch_commit),
             Err(_) => {
@@ -327,7 +378,7 @@ fn merge(
                     &refname,
                     fetch_commit.id(),
                     true,
-                    &format!("Setting {} to {}", config.branch, fetch_commit.id()),
+                    &format!("Setting {} to {}", config.index_branch, fetch_commit.id()),
                 )?;
                 repository.set_head(&refname)?;
                 let mut checkout_builder = git2::build::CheckoutBuilder::default();
@@ -366,7 +417,7 @@ fn find_last_commit(repository: &Repository) -> Result<Commit, git2::Error> {
 #[tracing::instrument(skip(repository, config, message))]
 fn commit(
     repository: &Repository,
-    config: &IndexConfig,
+    config: &GitConfig,
     message: impl AsRef<str>,
 ) -> Result<(), git2::Error> {
     tracing::info!("commit changes");
@@ -394,7 +445,7 @@ fn commit(
 }
 
 #[tracing::instrument(skip(repository, config))]
-fn push_to_origin(repository: &Repository, config: &IndexConfig) -> Result<(), git2::Error> {
+fn push_to_origin(repository: &Repository, config: &GitConfig) -> Result<(), git2::Error> {
     tracing::debug!("push commits to origin");
     let mut remote = repository.find_remote("origin")?;
 
@@ -403,6 +454,6 @@ fn push_to_origin(repository: &Repository, config: &IndexConfig) -> Result<(), g
     let mut push_options = PushOptions::default();
     push_options.remote_callbacks(callbacks);
 
-    let refs = format!("refs/heads/{0}:refs/heads/{}", config.branch);
+    let refs = format!("refs/heads/{0}:refs/heads/{}", config.index_branch);
     remote.push(&[refs], Some(&mut push_options))
 }

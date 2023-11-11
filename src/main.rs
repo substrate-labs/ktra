@@ -5,15 +5,15 @@ mod db_manager;
 mod delete;
 mod error;
 mod get;
-mod index_manager;
+mod git_manager;
 mod models;
 mod openid;
 mod post;
 mod put;
 mod utils;
 
-use crate::config::Config;
-use crate::index_manager::IndexManager;
+use crate::config::{Config, GitConfig};
+use crate::git_manager::GitManager;
 use clap::{clap_app, crate_authors, crate_version, ArgMatches};
 use db_manager::DbManager;
 #[cfg(feature = "crates-io-mirroring")]
@@ -51,7 +51,7 @@ use db_manager::SledDbManager;
 ))]
 fn apis(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
     dl_dir_path: Arc<PathBuf>,
     http_client: Client,
     cache_dir_path: Arc<PathBuf>,
@@ -75,7 +75,7 @@ fn apis(
 #[tracing::instrument(skip(db_manager, index_manager, dl_dir_path, dl_path))]
 fn apis(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
     dl_dir_path: Arc<PathBuf>,
     dl_path: Vec<String>,
 ) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
@@ -105,18 +105,27 @@ async fn handle_rejection(rejection: Rejection) -> Result<impl Reply, Infallible
 }
 
 #[tracing::instrument(skip(config))]
-async fn run_server(config: Config) -> anyhow::Result<()> {
-    tracing::info!(
-        "crates directory: {:?}",
-        config.crate_files_config.dl_dir_path
-    );
+async fn run_server(config: Arc<Config>) -> anyhow::Result<()> {
+    tracing::info!("root directory: {:?}", config.root_dir_path);
+    let index_manager = GitManager::new(config.clone()).await?;
+    index_manager.pull().await?;
 
-    tokio::fs::create_dir_all(&config.crate_files_config.dl_dir_path).await?;
+    tokio::fs::write(
+        &config.root_dir_path.join(".gitignore"),
+        GitConfig::index_path_relative()
+            .as_os_str()
+            .to_str()
+            .unwrap(),
+    )
+    .await?;
+
+    let dl_dir_path = config.dl_dir_path();
     #[cfg(feature = "crates-io-mirroring")]
-    tokio::fs::create_dir_all(&config.crate_files_config.cache_dir_path).await?;
-    let dl_dir_path = config.crate_files_config.dl_dir_path.clone();
+    let cache_dir_path = config.cache_dir_path();
+
+    tokio::fs::create_dir_all(&dl_dir_path).await?;
     #[cfg(feature = "crates-io-mirroring")]
-    let cache_dir_path = config.crate_files_config.cache_dir_path.clone();
+    tokio::fs::create_dir_all(&cache_dir_path).await?;
     let dl_path = config.crate_files_config.dl_path.clone();
     let server_config = config.server_config.clone();
 
@@ -124,19 +133,17 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         feature = "db-sled",
         not(all(feature = "db-redis", feature = "db-mongo"))
     ))]
-    let db_manager = SledDbManager::new(&config.db_config).await?;
+    let db_manager = SledDbManager::new(&config).await?;
     #[cfg(all(
         feature = "db-redis",
         not(all(feature = "db-sled", feature = "db-mongo"))
     ))]
-    let db_manager = RedisDbManager::new(&config.db_config).await?;
+    let db_manager = RedisDbManager::new(&config).await?;
     #[cfg(all(
         feature = "db-mongo",
         not(all(feature = "db-sled", feature = "db-redis"))
     ))]
-    let db_manager = MongoDbManager::new(&config.db_config).await?;
-    let index_manager = IndexManager::new(config.index_config).await?;
-    index_manager.pull().await?;
+    let db_manager = MongoDbManager::new(&config).await?;
 
     #[cfg(feature = "crates-io-mirroring")]
     let http_client = Client::builder().build()?;
@@ -156,7 +163,7 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
     #[cfg(feature = "openid")]
     let routes = routes.or(openid::apis(
         db_manager.clone(),
-        Arc::new(config.openid_config),
+        config.openid_config.clone(),
     ));
 
     let routes = routes
@@ -186,16 +193,15 @@ fn matches() -> ArgMatches<'static> {
         (author: crate_authors!())
         (about: "Your Little Cargo Registry.")
         (@arg CONFIG: -c --config +takes_value "Sets a config file")
-        (@arg DL_DIR_PATH: --("dl-dir-path") +takes_value "Sets the crate files directory")
-        (@arg CACHE_DIR_PATH: --("cache-dir-path") +takes_value "Sets the crates.io cache files directory (needs `crates-io-mirroring` feature)")
+        (@arg ROOT_DIR_PATH: -r --("root-dir-path") +takes_value ... "Sets the root directory for storing persistent state.")
         (@arg DL_PATH: --("dl-path") +takes_value ... "Sets a crate files download path")
         (@arg LOGIN_PREFIX: --("login-prefix") +takes_value "Sets the prefix to registered users on the registry.")
-        (@arg DB_DIR_PATH: --("db-dir-path") +takes_value "Sets a database directory (needs `db-sled` feature)")
         (@arg REDIS_URL: --("redis-url") + takes_value "Sets a Redis URL (needs `db-redis` feature)")
         (@arg MONGODB_URL: --("mongodb-url") + takes_value "Sets a MongoDB URL (needs `db-mongo` feature)")
-        (@arg REMOTE_URL: --("remote-url") +takes_value "Sets a URL for the remote index git repository")
-        (@arg LOCAL_PATH: --("local-path") +takes_value "Sets a path for local index git repository")
-        (@arg BRANCH: --branch +takes_value "Sets a branch name of the index git repository")
+        (@arg BACKUP_REMOTE_URL: --("backup-remote-url") +takes_value "Sets a URL for the remote backup git repository")
+        (@arg BACKUP_BRANCH: --("backup-branch") +takes_value "Sets a branch name of the backup git repository")
+        (@arg INDEX_REMOTE_URL: --("index-remote-url") +takes_value "Sets a URL for the remote index git repository")
+        (@arg INDEX_BRANCH: --("index-branch") +takes_value "Sets a branch name of the index git repository")
         (@arg HTTPS_USERNAME: --("https-username") +takes_value "Sets a username to use for authentication if the remote index git repository uses HTTPS protocol")
         (@arg HTTPS_PASSWORD: --("https-password") +takes_value "Sets a password to use for authentication if the remote index git repository uses HTTPS protocol")
         (@arg SSH_USERNAME: --("ssh-username") +takes_value "Sets a username to use for authentication if the remote index git repository uses SSH protocol")
@@ -225,13 +231,11 @@ async fn main() -> anyhow::Result<()> {
     let config_file_path = matches.value_of("CONFIG").unwrap_or("ktra.toml");
     let mut config = config(config_file_path).await?;
 
-    if let Some(dl_dir_path) = matches.value_of("DL_DIR_PATH").map(PathBuf::from) {
-        config.crate_files_config.dl_dir_path = dl_dir_path;
-    }
-
-    #[cfg(feature = "crates-io-mirroring")]
-    if let Some(cache_dir_path) = matches.value_of("CACHE_DIR_PATH").map(PathBuf::from) {
-        config.crate_files_config.cache_dir_path = cache_dir_path;
+    if let Some(root_dir_path) = matches
+        .values_of("ROOT_DIR_PATH")
+        .map(|vs| vs.map(ToOwned::to_owned).collect())
+    {
+        config.root_dir_path = root_dir_path;
     }
 
     if let Some(dl_path) = matches
@@ -245,11 +249,6 @@ async fn main() -> anyhow::Result<()> {
         config.db_config.login_prefix = login_prefix.into();
     }
 
-    #[cfg(feature = "db-sled")]
-    if let Some(db_dir_path) = matches.value_of("DB_DIR_PATH").map(PathBuf::from) {
-        config.db_config.db_dir_path = db_dir_path;
-    }
-
     #[cfg(feature = "db-redis")]
     if let Some(redis_url) = matches.value_of("REDIS_URL").map(ToOwned::to_owned) {
         config.db_config.redis_url = redis_url;
@@ -260,51 +259,55 @@ async fn main() -> anyhow::Result<()> {
         config.db_config.mongodb_url = mongodb_url;
     }
 
-    if let Some(remote_url) = matches.value_of("REMOTE_URL").map(ToOwned::to_owned) {
-        config.index_config.remote_url = remote_url;
+    if let Some(remote_url) = matches.value_of("BACKUP_REMOTE_URL").map(ToOwned::to_owned) {
+        config.git_config.backup_remote_url = remote_url;
     }
 
-    if let Some(local_path) = matches.value_of("LOCAL_PATH").map(PathBuf::from) {
-        config.index_config.local_path = local_path;
+    if let Some(branch) = matches.value_of("BACKUP_BRANCH").map(ToOwned::to_owned) {
+        config.git_config.backup_branch = branch;
     }
 
-    if let Some(branch) = matches.value_of("BRANCH").map(ToOwned::to_owned) {
-        config.index_config.branch = branch;
+    if let Some(remote_url) = matches.value_of("INDEX_REMOTE_URL").map(ToOwned::to_owned) {
+        config.git_config.index_remote_url = remote_url;
+    }
+
+    if let Some(branch) = matches.value_of("INDEX_BRANCH").map(ToOwned::to_owned) {
+        config.git_config.index_branch = branch;
     }
 
     if let Some(https_username) = matches.value_of("HTTPS_USERNAME").map(ToOwned::to_owned) {
-        config.index_config.https_username = Some(https_username);
+        config.git_config.https_username = Some(https_username);
     }
 
     if let Some(https_password) = matches.value_of("HTTPS_PASSWORD").map(ToOwned::to_owned) {
-        config.index_config.https_password = Some(https_password);
+        config.git_config.https_password = Some(https_password);
     }
 
     if let Some(ssh_username) = matches.value_of("SSH_USERNAME").map(ToOwned::to_owned) {
-        config.index_config.ssh_username = Some(ssh_username);
+        config.git_config.ssh_username = Some(ssh_username);
     }
 
     if let Some(ssh_pubkey_path) = matches.value_of("SSH_PUBKEY_PATH").map(PathBuf::from) {
-        config.index_config.ssh_pubkey_path = Some(ssh_pubkey_path);
+        config.git_config.ssh_pubkey_path = Some(ssh_pubkey_path);
     }
 
     if let Some(ssh_privkey_path) = matches.value_of("SSH_PRIVKEY_PATH").map(PathBuf::from) {
-        config.index_config.ssh_privkey_path = Some(ssh_privkey_path);
+        config.git_config.ssh_privkey_path = Some(ssh_privkey_path);
     }
 
     if let Some(ssh_key_passphrase) = matches
         .value_of("SSH_KEY_PASSPHRASE")
         .map(ToOwned::to_owned)
     {
-        config.index_config.ssh_key_passphrase = Some(ssh_key_passphrase);
+        config.git_config.ssh_key_passphrase = Some(ssh_key_passphrase);
     }
 
     if let Some(name) = matches.value_of("GIT_NAME").map(ToOwned::to_owned) {
-        config.index_config.name = name;
+        config.git_config.name = name;
     }
 
     if let Some(email) = matches.value_of("GIT_EMAIL").map(ToOwned::to_owned) {
-        config.index_config.email = Some(email);
+        config.git_config.email = Some(email);
     }
 
     if let Some(address) = matches
@@ -357,5 +360,5 @@ async fn main() -> anyhow::Result<()> {
             Some(gitlab_users.split(',').map(ToString::to_string).collect());
     }
 
-    run_server(config).await
+    run_server(Arc::new(config)).await
 }

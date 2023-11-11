@@ -1,6 +1,6 @@
 #![cfg(feature = "db-sled")]
 
-use crate::config::DbConfig;
+use crate::config::Config;
 use crate::error::Error;
 use crate::models::{Entry, Metadata, Query, Search, User};
 use argon2::{self, hash_encoded, verify_encoded};
@@ -22,6 +22,7 @@ const SCHEMA_VERSION: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 3];
 const USERS_KEY: &str = "__USERS__";
 const PASSWORDS_KEY: &str = "__PASSWORDS__";
 const TOKENS_KEY: &str = "__TOKENS__";
+#[cfg(feature = "openid")]
 const OAUTH_NONCES_KEY: &str = "__OAUTH_NONCES__";
 
 const OLD_TOKENS_KEY: &str = "tokens";
@@ -34,9 +35,9 @@ pub struct SledDbManager {
 #[async_trait]
 impl DbManager for SledDbManager {
     #[tracing::instrument(skip(config))]
-    async fn new(config: &DbConfig) -> Result<SledDbManager, Error> {
-        let path = config.db_dir_path.clone();
-        tracing::info!("create and/or open database: {:?}", config.db_dir_path);
+    async fn new(config: &Config) -> Result<SledDbManager, Error> {
+        let path = config.db_dir_path();
+        tracing::info!("create and/or open database: {:?}", path);
 
         let tree = tokio::task::spawn_blocking(|| sled::open(path).map_err(Error::Db))
             .map_err(Error::Join)
@@ -52,7 +53,7 @@ impl DbManager for SledDbManager {
 
         let db_manager = SledDbManager {
             tree,
-            login_prefix: config.login_prefix.clone(),
+            login_prefix: config.db_config.login_prefix.clone(),
         };
 
         Ok(db_manager)

@@ -112,5 +112,6 @@ $RECYCLE.BIN/
 /db/
 /index/
 ktra.toml
+.idea
 
 # End of https://www.toptal.com/developers/gitignore/api/rust,macos,linux,windows,vscode,vim

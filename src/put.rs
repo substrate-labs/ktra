@@ -1,6 +1,6 @@
 use crate::db_manager::DbManager;
 use crate::error::Error;
-use crate::index_manager::IndexManager;
+use crate::git_manager::GitManager;
 use crate::models::{Metadata, Owners};
 use crate::utils::{
     authorization_header, empty_json_message, ok_json_message, ok_with_msg_json_message,
@@ -19,7 +19,7 @@ use warp::{Filter, Rejection, Reply};
 #[tracing::instrument(skip(db_manager, index_manager, dl_dir_path))]
 pub fn apis(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
     dl_dir_path: Arc<PathBuf>,
 ) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     new(db_manager.clone(), index_manager.clone(), dl_dir_path)
@@ -30,7 +30,7 @@ pub fn apis(
 #[tracing::instrument(skip(db_manager, index_manager, dl_dir_path))]
 fn new(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
     dl_dir_path: Arc<PathBuf>,
 ) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     warp::put()
@@ -46,7 +46,7 @@ fn new(
 #[tracing::instrument(skip(db_manager, index_manager, token, dl_dir_path, body))]
 async fn handle_new(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
     token: String,
     dl_dir_path: Arc<PathBuf>,
     body: Bytes,
@@ -118,6 +118,11 @@ async fn handle_new(
             .add_new_metadata(user_id, metadata)
             .map_ok(empty_json_message)
             .map_err(warp::reject::custom)
+            .await?;
+        index_manager
+            .backup()
+            .map_ok(empty_json_message)
+            .map_err(warp::reject::custom)
             .await
     } else {
         Err(Error::InvalidBodyLength(remainder.len())).map_err(warp::reject::custom)
@@ -127,7 +132,7 @@ async fn handle_new(
 #[tracing::instrument(skip(db_manager, index_manager))]
 fn unyank(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
     warp::put()
         .and(with_db_manager(db_manager))
@@ -142,7 +147,7 @@ fn unyank(
 #[tracing::instrument(skip(db_manager, index_manager, token, crate_name, version))]
 async fn handle_unyank(
     db_manager: Arc<RwLock<impl DbManager>>,
-    index_manager: Arc<IndexManager>,
+    index_manager: Arc<GitManager>,
     token: String,
     crate_name: String,
     version: Version,
@@ -174,6 +179,11 @@ async fn handle_unyank(
 
     db_manager
         .unyank(&crate_name, version)
+        .map_ok(ok_json_message)
+        .map_err(warp::reject::custom)
+        .await?;
+    index_manager
+        .backup()
         .map_ok(ok_json_message)
         .map_err(warp::reject::custom)
         .await

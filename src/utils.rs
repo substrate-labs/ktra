@@ -1,7 +1,7 @@
 use crate::config::OpenIdConfig;
 use crate::db_manager::DbManager;
 use crate::error::Error;
-use crate::index_manager::IndexManager;
+use crate::git_manager::GitManager;
 use futures::TryFutureExt;
 use rand::distributions::Alphanumeric;
 use rand::prelude::*;
@@ -102,8 +102,8 @@ pub fn with_db_manager(
 
 #[tracing::instrument(skip(index_manager))]
 pub fn with_index_manager(
-    index_manager: Arc<IndexManager>,
-) -> impl Filter<Extract = (Arc<IndexManager>,), Error = Infallible> + Clone {
+    index_manager: Arc<GitManager>,
+) -> impl Filter<Extract = (Arc<GitManager>,), Error = Infallible> + Clone {
     warp::any().map(move || index_manager.clone())
 }
 
